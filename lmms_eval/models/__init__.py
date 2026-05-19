@@ -59,6 +59,7 @@ AVAILABLE_SIMPLE_MODELS = {
     "llava_onevision_moviechat": "Llava_OneVision_MovieChat",
     "llava_sglang": "LlavaSglang",
     "llava_vid": "LlavaVid",
+    "llava_apertus": "LlavaApertus",
     "llava": "Llava",
     "litellm": "LiteLLMCompatible",
     "longva": "LongVA",

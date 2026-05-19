@@ -24,8 +24,9 @@ from loguru import logger as eval_logger
 
 try:
     from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
-    from llava.conversation import conv_templates
+    from llava.conversation import SeparatorStyle, conv_templates
     from llava.mm_utils import (
+        KeywordsStoppingCriteria,
         get_model_name_from_path,
         process_images,
         tokenizer_image_token,
@@ -61,6 +62,7 @@ class Llava(lmms):
         device_map="cuda:0",
         conv_template="vicuna_v1",
         use_cache=True,
+        use_stop_str: bool = False,
         tie_weights: bool = True,
         truncate_context=False,  # whether to truncate the context in generation, set it False for LLaVA-1.6
         customized_config=None,  # ends in json
@@ -109,6 +111,7 @@ class Llava(lmms):
         self.batch_size_per_gpu = int(batch_size)
         self.conv_template = conv_template
         self.use_cache = use_cache
+        self.use_stop_str = use_stop_str
         self.truncate_context = truncate_context
         # assert self.batch_size_per_gpu == 1, "Llava currently does not support batched generation. See https://github.com/haotian-liu/LLaVA/issues/754. HF Llava also has this issue."
         if accelerator.num_processes > 1:
@@ -156,9 +159,10 @@ class Llava(lmms):
     def model(self):
         # returns the model, unwrapping it if using Accelerate
         if hasattr(self, "accelerator"):
-            return self.accelerator.unwrap_model(self._model)
-        else:
+            if hasattr(self._model, "module"):
+                return self._model.module
             return self._model
+        return self._model
 
     @property
     def eot_token_id(self):
@@ -249,6 +253,8 @@ class Llava(lmms):
                 conv = copy.deepcopy(conv_templates[self.conv_template])
             else:
                 conv = conv_templates[self.conv_template].copy()
+            if conv.sep_style in {SeparatorStyle.LLAMA_3, SeparatorStyle.APERTUS_ORI} and conv.tokenizer is None:
+                conv.tokenizer = self.tokenizer
             conv.append_message(conv.roles[0], prompts_input)
             conv.append_message(conv.roles[1], None)
             prompt = conv.get_prompt()
@@ -345,6 +351,7 @@ class Llava(lmms):
 
             question_input = []
 
+            stop_str = None
             for visual, context in zip(batched_visuals, contexts):
                 if image_tensor is not None and len(image_tensor) != 0 and DEFAULT_IMAGE_TOKEN not in context:
                     """
@@ -363,8 +370,17 @@ class Llava(lmms):
                     conv = copy.deepcopy(conv_templates[self.conv_template])
                 else:
                     conv = conv_templates[self.conv_template].copy()
+                if conv.sep_style in {SeparatorStyle.LLAMA_3, SeparatorStyle.APERTUS_ORI} and conv.tokenizer is None:
+                    conv.tokenizer = self.tokenizer
                 conv.append_message(conv.roles[0], question)
                 conv.append_message(conv.roles[1], None)
+                if self.use_stop_str and stop_str is None:
+                    if hasattr(conv, "stop_str") and conv.stop_str:
+                        stop_str = conv.stop_str
+                    elif conv.sep_style == SeparatorStyle.TWO:
+                        stop_str = conv.sep2
+                    else:
+                        stop_str = conv.sep
                 prompt_question = conv.get_prompt()
                 question_input.append(prompt_question)
 
@@ -386,20 +402,28 @@ class Llava(lmms):
             attention_masks = input_ids.ne(pad_token_ids).to(self.device)
             # These steps are not in LLaVA's original code, but are necessary for generation to work
             # TODO: attention to this major generation step...
+            stopping_criteria = None
+            if self.use_stop_str and stop_str:
+                stopping_criteria = KeywordsStoppingCriteria([stop_str], self.tokenizer, input_ids)
+            gen_args = {
+                "input_ids": input_ids,
+                "attention_mask": attention_masks,
+                "pad_token_id": pad_token_ids,
+                "images": image_tensor,
+                "image_sizes": gen_kwargs["image_sizes"],
+                "do_sample": True if gen_kwargs["temperature"] > 0 else False,
+                "temperature": gen_kwargs["temperature"],
+                "top_p": gen_kwargs["top_p"],
+                "num_beams": gen_kwargs["num_beams"],
+                "max_new_tokens": gen_kwargs["max_new_tokens"],
+                "use_cache": self.use_cache,
+            }
+            if getattr(self.model.config, "model_type", "") == "llava_apertus":
+                gen_args["inputs"] = gen_args.pop("input_ids")
+            if stopping_criteria is not None:
+                gen_args["stopping_criteria"] = [stopping_criteria]
             try:
-                cont = self.model.generate(
-                    input_ids,
-                    attention_mask=attention_masks,
-                    pad_token_id=pad_token_ids,
-                    images=image_tensor,
-                    image_sizes=gen_kwargs["image_sizes"],
-                    do_sample=True if gen_kwargs["temperature"] > 0 else False,
-                    temperature=gen_kwargs["temperature"],
-                    top_p=gen_kwargs["top_p"],
-                    num_beams=gen_kwargs["num_beams"],
-                    max_new_tokens=gen_kwargs["max_new_tokens"],
-                    use_cache=self.use_cache,
-                )
+                cont = self.model.generate(**gen_args)
                 text_outputs = self.tokenizer.batch_decode(cont, skip_special_tokens=True)
             except Exception as e:
                 raise e
