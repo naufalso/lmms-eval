@@ -33,7 +33,7 @@ try:
     )
     from llava.model.builder import load_pretrained_model
 except Exception as e:
-    eval_logger.debug("LLaVA is not installed. Please install LLaVA to use this model.\nError: %s" % e)
+    eval_logger.warning("LLaVA is not installed. Please install LLaVA to use this model.\nError: %s" % e)
 
 # inference implementation for attention, can be "sdpa", "eager", "flash_attention_2". Seems FA2 is not effective during inference: https://discuss.huggingface.co/t/flash-attention-has-no-effect-on-inference/73453/5
 # if is_flash_attn_2_available:
@@ -418,7 +418,7 @@ class Llava(lmms):
                 "max_new_tokens": gen_kwargs["max_new_tokens"],
                 "use_cache": self.use_cache,
             }
-            if getattr(self.model.config, "model_type", "") == "llava_apertus":
+            if getattr(self.model.config, "model_type", "") in {"llava_apertus", "llava_llama"}:
                 gen_args["inputs"] = gen_args.pop("input_ids")
             if stopping_criteria is not None:
                 gen_args["stopping_criteria"] = [stopping_criteria]
